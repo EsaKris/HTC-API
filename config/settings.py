@@ -4,6 +4,7 @@ Uses python-decouple for environment variable management.
 Copy .env.example → .env and fill in your values.
 """
 
+import os
 from pathlib import Path
 from datetime import timedelta
 from decouple import config, Csv
@@ -224,18 +225,33 @@ if DEBUG:
 # ---------------------------------------------------------------------------
 # Caching (Redis)
 # ---------------------------------------------------------------------------
+
+
+# Redis URL (Upstash in production, local fallback in dev)
+REDIS_URL = os.environ.get("REDIS_URL") or config("REDIS_URL", default="redis://127.0.0.1:6379/1")
+
+# Django cache
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": config("REDIS_URL", default="redis://127.0.0.1:6379/1"),
+        "LOCATION": REDIS_URL,
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "IGNORE_EXCEPTIONS": True,
         },
     }
 }
-# Use Redis for session too
+
+# Sessions via Redis
 SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_CACHE_ALIAS = "default"
+
+# Celery
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_URL
+
+# Run Celery tasks immediately in DEBUG mode (no Redis required locally)
+CELERY_TASK_ALWAYS_EAGER = os.environ.get("DEBUG", "False") == "True"
 
 # ---------------------------------------------------------------------------
 # Static / Media
