@@ -36,7 +36,7 @@ THIRD_PARTY_APPS = [
     "corsheaders",
     "django_filters",
     "drf_spectacular",
-    "sslserver", # For local HTTPS testing (optional)"
+    # "sslserver", # For local HTTPS testing (optional)"
 ]
 
 LOCAL_APPS = [
