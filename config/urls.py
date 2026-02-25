@@ -24,6 +24,9 @@ from drf_spectacular.views import (
     SpectacularRedocView,
 )
 
+
+from drivers.views import RegisterBikeAndOwnerView
+
 urlpatterns = [
     # Django admin
     path("admin/", admin.site.urls),
@@ -36,7 +39,7 @@ urlpatterns = [
 
     # Rides endpoints (to be built next)
     path("api/rides/", include("rides.urls")),
-
+    path("api/register-bike/", RegisterBikeAndOwnerView.as_view()),
     # OpenAPI schema
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),

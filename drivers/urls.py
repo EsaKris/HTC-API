@@ -12,6 +12,18 @@ from .views import (
     DriverProfileView,
     AdminDriverListView,
     DriverRideDetailView,
+    # Bike Owner Management
+    BikeOwnerListView,
+    BikeOwnerDetailView,
+    BikeOwnerEarningsView,
+    BikeOwnerContactView,
+    
+    # Registration
+    RegisterBikeAndOwnerView,
+    BikeRegistrationListView,
+    BikeRegistrationDetailView,
+    ApproveBikeRegistrationView,
+    RejectBikeRegistrationView,
 )
 
 urlpatterns = [
@@ -48,4 +60,49 @@ urlpatterns = [
 
     # Update bike status (available / maintenance / retired)
     path("bikes/<uuid:bike_id>/status/", BikeStatusUpdateView.as_view(), name="bike-status"),
+       
+        # ── Admin: Bike Owner Management ─────────────────────────────────────
+    
+    path(
+        "admin/bike-owners/",
+        BikeOwnerListView.as_view(),
+        name="bike-owners-list"
+    ),
+    path(
+        "admin/bike-owners/<uuid:owner_id>/",
+        BikeOwnerDetailView.as_view(),
+        name="bike-owner-detail"
+    ),
+    path(
+        "admin/bike-owners/<uuid:owner_id>/earnings/",
+        BikeOwnerEarningsView.as_view(),
+        name="bike-owner-earnings"
+    ),
+    path(
+        "admin/bike-owners/<uuid:owner_id>/contact/",
+        BikeOwnerContactView.as_view(),
+        name="bike-owner-contact"
+    ),
+    
+    # ── Admin: Bike Registrations ────────────────────────────────────────
+    path(
+        "admin/bike-registrations/",
+        BikeRegistrationListView.as_view(),
+        name="bike-registrations-list"
+    ),
+    path(
+        "admin/bike-registrations/<uuid:registration_id>/",
+        BikeRegistrationDetailView.as_view(),
+        name="bike-registration-detail"
+    ),
+    path(
+        "admin/bike-registrations/<uuid:registration_id>/approve/",
+        ApproveBikeRegistrationView.as_view(),
+        name="approve-bike-registration"
+    ),
+    path(
+        "admin/bike-registrations/<uuid:registration_id>/reject/",
+        RejectBikeRegistrationView.as_view(),
+        name="reject-bike-registration"
+    ),
 ]

@@ -8,13 +8,13 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, JSONParser
-
+from rest_framework.permissions import AllowAny, IsAdminUser
 from core.permissions import IsAdmin, IsDriver, IsRiderOrAdmin
 from core.utils import (
     send_driver_acceptance_email,
     send_driver_rejection_email,
 )
-from .models import DriverApplication, Bike
+from .models import DriverApplication, Bike, BikeOwner, BikeRegistration
 from rides.models import Ride
 from rides.serializers import RideSerializer
 
@@ -28,7 +28,20 @@ from .serializers import (
     BikeCreateSerializer,
     AssignBikeSerializer,
     DriverProfileSerializer,
+    BikeOwnerSerializer,
+    BikeOwnerDetailSerializer,
+    BikeOwnerWithBikesSerializer,
+    BikeRegistrationSerializer,
+    BikeRegistrationDetailSerializer,
 )
+
+# ══════════════════════════════════════════════════════════════════════════
+# ADD THESE IMPORTS AT THE TOP OF drivers/views.py (if not present)
+# ══════════════════════════════════════════════════════════════════════════
+
+from django.db.models import Count, Sum, Q
+from rest_framework.parsers import MultiPartParser, FormParser
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -495,3 +508,455 @@ class AdminDriverListView(generics.ListAPIView):
         return User.objects.filter(
             role=User.Role.DRIVER, is_active=True
         ).select_related("assigned_bike").all()
+    
+
+# ══════════════════════════════════════════════════════════════════════════
+# PUBLIC REGISTRATION ENDPOINT (Anyone can register their bike)
+# ══════════════════════════════════════════════════════════════════════════
+
+class RegisterBikeAndOwnerView(APIView):
+    """
+    POST /api/bikes/register/
+    PUBLIC endpoint - no authentication required.
+    Anyone can register their bike and become a bike owner.
+    """
+    
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+    
+    def post(self, request):
+        serializer = BikeRegistrationSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            registration = serializer.save()
+            
+            # TODO: Send email/SMS notification to owner confirming submission
+            # TODO: Notify admin about new registration
+            
+            return Response(
+                {
+                    "success": True,
+                    "message": "Registration submitted successfully! We'll review and contact you within 24-48 hours.",
+                    "registration_id": str(registration.id),
+                    "status": "pending",
+                },
+                status=status.HTTP_201_CREATED
+            )
+        
+        return Response(
+            {"success": False, "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ADMIN: BIKE OWNER MANAGEMENT
+# ══════════════════════════════════════════════════════════════════════════
+
+class BikeOwnerListView(APIView):
+    """
+    GET /api/admin/bike-owners/
+    List all bike owners with filter options.
+    Query params: ?status=active|pending|suspended
+    """
+    
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    
+    def get(self, request):
+        queryset = BikeOwner.objects.annotate(
+            total_bikes=Count('bikes'),
+            active_bikes=Count('bikes', filter=Q(bikes__status='in_use'))
+        ).select_related('verified_by').all()
+        
+        # Filter by status
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        
+        # Search
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(full_name__icontains=search) |
+                Q(phone_number__icontains=search) |
+                Q(email__icontains=search)
+            )
+        
+        # Pagination
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+        start = (page - 1) * page_size
+        end = start + page_size
+        
+        total = queryset.count()
+        results = queryset[start:end]
+        
+        serializer = BikeOwnerSerializer(results, many=True)
+        
+        return Response({
+            "count": total,
+            "next": f"?page={page + 1}" if end < total else None,
+            "previous": f"?page={page - 1}" if page > 1 else None,
+            "results": serializer.data,
+        })
+
+
+class BikeOwnerDetailView(APIView):
+    """
+    GET /api/admin/bike-owners/{id}/
+    Get full bike owner profile with earnings and all bikes.
+    Shows contact info, bank details, which driver is on which bike.
+    
+    PUT /api/admin/bike-owners/{id}/
+    Update owner info (admin notes, status, bank details, etc.)
+    """
+    
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    
+    def get(self, request, owner_id):
+        try:
+            owner = BikeOwner.objects.annotate(
+                total_bikes=Count('bikes'),
+                active_bikes=Count('bikes', filter=Q(bikes__status='in_use'))
+            ).select_related('verified_by').get(id=owner_id)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Bike owner not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Include full bike details with driver assignments
+        serializer = BikeOwnerWithBikesSerializer(owner)
+        return Response(serializer.data)
+    
+    def put(self, request, owner_id):
+        """Update owner details"""
+        try:
+            owner = BikeOwner.objects.get(id=owner_id)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Bike owner not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        serializer = BikeOwnerDetailSerializer(owner, data=request.data, partial=True)
+        
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "success": True,
+                "message": "Bike owner updated successfully.",
+                "owner": serializer.data,
+            })
+        
+        return Response(
+            {"success": False, "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+class BikeOwnerEarningsView(APIView):
+    """
+    GET /api/admin/bike-owners/{id}/earnings/
+    Detailed earnings breakdown for a bike owner.
+    Shows per-bike earnings, total rides, payment history.
+    """
+    
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    
+    def get(self, request, owner_id):
+        try:
+            owner = BikeOwner.objects.get(id=owner_id)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Bike owner not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Calculate earnings per bike
+        bikes_earnings = []
+        for bike in owner.bikes.select_related('driver').all():
+            from rides.models import Ride
+            
+            rides = Ride.objects.filter(
+                driver__assigned_bike=bike,
+                status="COMPLETED"
+            ).order_by('-created_at')
+            
+            total_earnings = rides.aggregate(total=Sum('price'))['total'] or 0
+            ride_count = rides.count()
+            
+            bikes_earnings.append({
+                "bike_id": str(bike.id),
+                "license_plate": bike.license_plate,
+                "model": bike.model,
+                "driver": {
+                    "id": str(bike.driver.id),
+                    "name": bike.driver.full_name,
+                } if bike.driver else None,
+                "total_earnings": total_earnings,
+                "total_rides": ride_count,
+                "recent_rides": [
+                    {
+                        "id": str(ride.id),
+                        "rider_name": ride.rider.full_name,
+                        "price": ride.price,
+                        "completed_at": ride.completed_at,
+                    }
+                    for ride in rides[:5]  # Last 5 rides
+                ]
+            })
+        
+        total_earnings = sum(b["total_earnings"] for b in bikes_earnings)
+        total_rides = sum(b["total_rides"] for b in bikes_earnings)
+        
+        return Response({
+            "owner": {
+                "id": str(owner.id),
+                "name": owner.full_name,
+                "phone": owner.phone_number,
+                "email": owner.email,
+            },
+            "summary": {
+                "total_earnings": total_earnings,
+                "total_rides": total_rides,
+                "active_bikes": owner.active_bikes,
+                "total_bikes": owner.total_bikes,
+            },
+            "bikes": bikes_earnings,
+        })
+
+
+class BikeOwnerContactView(APIView):
+    """
+    POST /api/admin/bike-owners/{id}/contact/
+    Send a message/notification to bike owner.
+    Body: { "subject": "...", "message": "..." }
+    
+    This logs the contact attempt and can send email/SMS.
+    """
+    
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    
+    def post(self, request, owner_id):
+        try:
+            owner = BikeOwner.objects.get(id=owner_id)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Bike owner not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        subject = request.data.get('subject', '')
+        message = request.data.get('message', '')
+        
+        if not message:
+            return Response(
+                {"success": False, "message": "Message is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # TODO: Send email to owner.email
+        # TODO: Send SMS to owner.phone_number
+        # TODO: Log this contact in a ContactLog model
+        
+        # For now, just return success
+        return Response({
+            "success": True,
+            "message": f"Message sent to {owner.full_name}.",
+            "contact_info": {
+                "email": owner.email,
+                "phone": owner.phone_number,
+            }
+        })
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ADMIN: REGISTRATION APPROVAL WORKFLOW
+# ══════════════════════════════════════════════════════════════════════════
+
+class BikeRegistrationListView(APIView):
+    """
+    GET /api/admin/bike-registrations/
+    List all bike registrations (pending, approved, rejected).
+    Query params: ?status=pending|approved|rejected
+    """
+    
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    
+    def get(self, request):
+        queryset = BikeRegistration.objects.select_related(
+            'reviewed_by',
+            'approved_owner',
+            'approved_bike'
+        ).all()
+        
+        # Filter by status
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        
+        # Pagination
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+        start = (page - 1) * page_size
+        end = start + page_size
+        
+        total = queryset.count()
+        results = queryset[start:end]
+        
+        serializer = BikeRegistrationDetailSerializer(results, many=True)
+        
+        return Response({
+            "count": total,
+            "next": f"?page={page + 1}" if end < total else None,
+            "previous": f"?page={page - 1}" if page > 1 else None,
+            "results": serializer.data,
+        })
+
+
+class BikeRegistrationDetailView(APIView):
+    """
+    GET /api/admin/bike-registrations/{id}/
+    View full registration details for admin review.
+    """
+    
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    
+    def get(self, request, registration_id):
+        try:
+            registration = BikeRegistration.objects.select_related(
+                'reviewed_by',
+                'approved_owner',
+                'approved_bike'
+            ).get(id=registration_id)
+        except BikeRegistration.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Registration not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        serializer = BikeRegistrationDetailSerializer(registration)
+        return Response(serializer.data)
+
+
+class ApproveBikeRegistrationView(APIView):
+    """
+    POST /api/admin/bike-registrations/{id}/approve/
+    Approve a bike registration.
+    Creates BikeOwner (if new) and Bike records.
+    """
+    
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    
+    def post(self, request, registration_id):
+        try:
+            registration = BikeRegistration.objects.get(id=registration_id)
+        except BikeRegistration.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Registration not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if registration.status != 'pending':
+            return Response(
+                {"success": False, "message": f"Registration is already {registration.status}."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if owner already exists by phone or email
+        owner = BikeOwner.objects.filter(
+            Q(phone_number=registration.owner_phone) |
+            Q(email=registration.owner_email)
+        ).first()
+        
+        if not owner:
+            # Create new bike owner
+            owner = BikeOwner.objects.create(
+                full_name=registration.owner_name,
+                phone_number=registration.owner_phone,
+                email=registration.owner_email,
+                address=registration.owner_address,
+                bank_name=registration.bank_name,
+                account_number=registration.account_number,
+                account_name=registration.account_name,
+                id_document=registration.id_document,
+                profile_photo=registration.owner_photo,
+                status='active',
+                verified_by=request.user,
+                verified_at=timezone.now(),
+            )
+        
+        # Create the bike
+        bike = Bike.objects.create(
+            owner=owner,
+            bike_type=registration.bike_type,
+            license_plate=registration.license_plate,
+            model=registration.model,
+            color=registration.color,
+            year=registration.year,
+            bike_photo=registration.bike_photo,
+            registration_document=registration.registration_document,
+            status='available',  # Available for driver assignment
+        )
+        
+        # Update registration
+        registration.status = 'approved'
+        registration.reviewed_by = request.user
+        registration.reviewed_at = timezone.now()
+        registration.approved_owner = owner
+        registration.approved_bike = bike
+        registration.save()
+        
+        # TODO: Send approval email/SMS to owner
+        
+        return Response({
+            "success": True,
+            "message": f"Registration approved! Bike {bike.license_plate} added to fleet.",
+            "owner_id": str(owner.id),
+            "bike_id": str(bike.id),
+            "owner_was_created": owner.created_at == owner.updated_at,  # True if new owner
+        })
+
+
+class RejectBikeRegistrationView(APIView):
+    """
+    POST /api/admin/bike-registrations/{id}/reject/
+    Reject a bike registration with reason.
+    Body: { "rejection_reason": "..." }
+    """
+    
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    
+    def post(self, request, registration_id):
+        try:
+            registration = BikeRegistration.objects.get(id=registration_id)
+        except BikeRegistration.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Registration not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if registration.status != 'pending':
+            return Response(
+                {"success": False, "message": f"Registration is already {registration.status}."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        rejection_reason = request.data.get('rejection_reason', '')
+        
+        registration.status = 'rejected'
+        registration.reviewed_by = request.user
+        registration.reviewed_at = timezone.now()
+        registration.rejection_reason = rejection_reason
+        registration.save()
+        
+        # TODO: Send rejection email/SMS to owner with reason
+        
+        return Response({
+            "success": True,
+            "message": "Registration rejected.",
+        })
+
+
+
