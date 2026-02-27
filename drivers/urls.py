@@ -17,6 +17,14 @@ from .views import (
     BikeOwnerDetailView,
     BikeOwnerEarningsView,
     BikeOwnerContactView,
+
+    # Bike Owner Auth & Dashboard
+    BikeOwnerLoginView,
+    BikeOwnerVerifyOTPView,
+    BikeOwnerDashboardView,
+    BikeOwnerAddBikeView,
+    BikeOwnerUpdateProfileView,
+    BikeOwnerPendingRegistrationsView,
     
     # Registration
     RegisterBikeAndOwnerView,
@@ -60,7 +68,35 @@ urlpatterns = [
 
     # Update bike status (available / maintenance / retired)
     path("bikes/<uuid:bike_id>/status/", BikeStatusUpdateView.as_view(), name="bike-status"),
-       
+
+
+        # ── Bike Owner Portal ────────────────────────────────────────────────
+    path(
+        "bike-owners/login/",
+        BikeOwnerLoginView.as_view(),
+        name="bike-owner-login"
+    ),
+    path(
+        "bike-owners/verify-otp/",
+        BikeOwnerVerifyOTPView.as_view(),
+        name="bike-owner-verify-otp"
+    ),
+    path(
+        "bike-owners/me/",
+        BikeOwnerDashboardView.as_view(),
+        name="bike-owner-dashboard"
+    ),
+    path(
+        "bike-owners/bikes/add/",
+        BikeOwnerAddBikeView.as_view(),
+        name="bike-owner-add-bike"
+    ),
+    path(
+        "bike-owners/registrations/pending/",
+        BikeOwnerPendingRegistrationsView.as_view(),
+        name="bike-owner-pending-registrations"
+    ),
+
         # ── Admin: Bike Owner Management ─────────────────────────────────────
     
     path(

@@ -958,5 +958,360 @@ class RejectBikeRegistrationView(APIView):
             "message": "Registration rejected.",
         })
 
+# ═══════════════════════════════════════════════════════════════════════════
+# BIKE OWNER AUTHENTICATION & DASHBOARD - ADD TO drivers/views.py
+# ═══════════════════════════════════════════════════════════════════════════
+
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.contrib.auth.hashers import make_password, check_password
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# BIKE OWNER AUTHENTICATION (Phone/OTP)
+# ══════════════════════════════════════════════════════════════════════════
+
+class BikeOwnerLoginView(APIView):
+    """
+    POST /api/bike-owners/login/
+    Send OTP to bike owner's phone/email
+    """
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        phone = request.data.get('phone_number', '').strip()
+        
+        if not phone:
+            return Response(
+                {"success": False, "message": "Phone number is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Find bike owner by phone
+        try:
+            owner = BikeOwner.objects.get(phone_number=phone)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "No bike owner account found with this phone number."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if owner.status != 'active':
+            return Response(
+                {"success": False, "message": f"Your account is {owner.status}. Contact support."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Generate OTP (6-digit)
+        otp = str(random.randint(100000, 999999))
+        
+        # Store in cache (10 minutes expiry)
+        cache.set(f"bike_owner_otp_{phone}", otp, timeout=600)
+        
+        # Send OTP via email (since we have their email)
+        # TODO: Replace with actual email service
+        send_mail(
+            subject="HFC - Your Login Code",
+            message=f"Your HFC Bike Owner login code is: {otp}\n\nValid for 10 minutes.",
+            from_email="noreply@howfar.ng",
+            recipient_list=[owner.email],
+            fail_silently=True,
+        )
+        
+        return Response({
+            "success": True,
+            "message": f"OTP sent to {owner.email}",
+            "owner_id": str(owner.id),
+        })
+
+
+class BikeOwnerVerifyOTPView(APIView):
+    """
+    POST /api/bike-owners/verify-otp/
+    Verify OTP and return JWT tokens
+    """
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        phone = request.data.get('phone_number', '').strip()
+        otp = request.data.get('otp', '').strip()
+        
+        if not phone or not otp:
+            return Response(
+                {"success": False, "message": "Phone number and OTP are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check OTP from cache
+        stored_otp = cache.get(f"bike_owner_otp_{phone}")
+        
+        if not stored_otp:
+            return Response(
+                {"success": False, "message": "OTP expired or invalid. Request a new one."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if stored_otp != otp:
+            return Response(
+                {"success": False, "message": "Invalid OTP. Please try again."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get bike owner
+        try:
+            owner = BikeOwner.objects.get(phone_number=phone)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Bike owner not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Clear OTP
+        cache.delete(f"bike_owner_otp_{phone}")
+        
+        # Generate custom JWT tokens for bike owner
+        # We'll store owner_id in the token payload
+        from rest_framework_simplejwt.tokens import RefreshToken as JWT
+        
+        # Create custom token
+        refresh = JWT()
+        refresh['owner_id'] = str(owner.id)
+        refresh['phone'] = owner.phone_number
+        refresh['type'] = 'bike_owner'
+        
+        return Response({
+            "success": True,
+            "message": "Login successful",
+            "tokens": {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+            },
+            "owner": {
+                "id": str(owner.id),
+                "full_name": owner.full_name,
+                "phone_number": owner.phone_number,
+                "email": owner.email,
+                "status": owner.status,
+                "total_bikes": owner.total_bikes,
+            }
+        })
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# BIKE OWNER DASHBOARD
+# ══════════════════════════════════════════════════════════════════════════
+
+class BikeOwnerDashboardView(APIView):
+    """
+    GET /api/bike-owners/me/
+    Get bike owner's profile and all their bikes
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        # Extract owner_id from JWT token
+        owner_id = request.auth.payload.get('owner_id') if hasattr(request.auth, 'payload') else None
+        
+        if not owner_id:
+            return Response(
+                {"success": False, "message": "Invalid token."},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        try:
+            owner = BikeOwner.objects.get(id=owner_id)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Bike owner not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get all bikes with earnings
+        bikes_data = []
+        total_earnings = 0
+        
+        for bike in owner.bikes.select_related('driver').all():
+            earnings = bike.calculate_total_earnings()
+            total_earnings += earnings
+            
+            bikes_data.append({
+                "id": str(bike.id),
+                "license_plate": bike.license_plate,
+                "model": bike.model,
+                "color": bike.color,
+                "bike_type": bike.bike_type,
+                "status": bike.status,
+                "driver": {
+                    "id": str(bike.driver.id),
+                    "full_name": bike.driver.full_name,
+                    "phone_number": bike.driver.phone_number,
+                } if bike.driver else None,
+                "assigned_at": bike.assigned_at,
+                "total_earnings": earnings,
+                "total_rides": bike.total_rides,
+                "created_at": bike.created_at,
+            })
+        
+        return Response({
+            "owner": {
+                "id": str(owner.id),
+                "full_name": owner.full_name,
+                "phone_number": owner.phone_number,
+                "email": owner.email,
+                "status": owner.status,
+                "created_at": owner.created_at,
+            },
+            "summary": {
+                "total_bikes": len(bikes_data),
+                "active_bikes": len([b for b in bikes_data if b['status'] == 'in_use']),
+                "total_earnings": total_earnings,
+                "total_rides": sum(b['total_rides'] for b in bikes_data),
+            },
+            "bikes": bikes_data,
+        })
+
+
+class BikeOwnerAddBikeView(APIView):
+    """
+    POST /api/bike-owners/bikes/add/
+    Existing bike owner adds a new bike
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+    
+    def post(self, request):
+        # Extract owner_id from JWT token
+        owner_id = request.auth.payload.get('owner_id') if hasattr(request.auth, 'payload') else None
+        
+        if not owner_id:
+            return Response(
+                {"success": False, "message": "Invalid token."},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        try:
+            owner = BikeOwner.objects.get(id=owner_id)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Bike owner not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if owner.status != 'active':
+            return Response(
+                {"success": False, "message": "Your account is not active. Contact support."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Create bike registration (will need admin approval)
+        serializer = BikeRegistrationSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            # Auto-fill owner info from existing account
+            registration = serializer.save(
+                owner_name=owner.full_name,
+                owner_phone=owner.phone_number,
+                owner_email=owner.email,
+                owner_address=owner.address,
+                bank_name=owner.bank_name,
+                account_number=owner.account_number,
+                account_name=owner.account_name,
+            )
+            
+            return Response({
+                "success": True,
+                "message": "Bike submitted for review. You'll be notified once approved.",
+                "registration_id": str(registration.id),
+            }, status=status.HTTP_201_CREATED)
+        
+        return Response(
+            {"success": False, "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+class BikeOwnerUpdateProfileView(APIView):
+    """
+    PUT /api/bike-owners/me/
+    Update bike owner profile (contact info, bank details)
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def put(self, request):
+        owner_id = request.auth.payload.get('owner_id') if hasattr(request.auth, 'payload') else None
+        
+        if not owner_id:
+            return Response(
+                {"success": False, "message": "Invalid token."},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        try:
+            owner = BikeOwner.objects.get(id=owner_id)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Bike owner not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Allow updating: email, address, bank details
+        allowed_fields = ['email', 'address', 'bank_name', 'account_number', 'account_name']
+        
+        for field in allowed_fields:
+            if field in request.data:
+                setattr(owner, field, request.data[field])
+        
+        owner.save()
+        
+        serializer = BikeOwnerDetailSerializer(owner)
+        return Response({
+            "success": True,
+            "message": "Profile updated successfully.",
+            "owner": serializer.data,
+        })
+
+
+class BikeOwnerPendingRegistrationsView(APIView):
+    """
+    GET /api/bike-owners/registrations/pending/
+    View bike owner's pending bike registrations
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        owner_id = request.auth.payload.get('owner_id') if hasattr(request.auth, 'payload') else None
+        
+        if not owner_id:
+            return Response(
+                {"success": False, "message": "Invalid token."},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        try:
+            owner = BikeOwner.objects.get(id=owner_id)
+        except BikeOwner.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Bike owner not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get all registrations for this owner (by phone/email match)
+        registrations = BikeRegistration.objects.filter(
+            Q(owner_phone=owner.phone_number) | Q(owner_email=owner.email)
+        ).order_by('-created_at')
+        
+        serializer = BikeRegistrationDetailSerializer(registrations, many=True)
+        
+        return Response({
+            "count": registrations.count(),
+            "registrations": serializer.data,
+        })
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ADD THESE IMPORTS AT TOP OF drivers/views.py
+# ══════════════════════════════════════════════════════════════════════════
+
+import random
+from django.core.mail import send_mail
+from django.core.cache import cache
+from rest_framework_simplejwt.tokens import RefreshToken
