@@ -58,36 +58,42 @@ class ApplyToDriverView(APIView):
     Automatically flips their role to pending_driver.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]  # Allow any authenticated user to apply
     parser_classes = [MultiPartParser, JSONParser]
 
     def post(self, request):
-        # Reject if already pending or approved
-        if request.user.role == User.Role.DRIVER:
-            return Response(
-                {"detail": "You are already an approved driver."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if request.user.role == User.Role.PENDING_DRIVER:
-            return Response(
-                {"detail": "Your application is already under review."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if request.user.role == User.Role.ADMIN:
-            return Response(
-                {"detail": "Admin accounts cannot apply as drivers."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        user = getattr(request, "user", None)
+
+        if user and user.is_authenticated:
+            if user.role == User.Role.DRIVER:
+                return Response(
+                    {"detail": "You are already an approved driver."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if user.role == User.Role.PENDING_DRIVER:
+                return Response(
+                    {"detail": "Your application is already under review."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if user.role == User.Role.ADMIN:
+                return Response(
+                    {"detail": "Admin accounts cannot apply as drivers."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
         serializer = DriverApplicationCreateSerializer(
-            data=request.data, context={"request": request}
+            data=request.data,
+            context={"request": request}
         )
+
         serializer.is_valid(raise_exception=True)
         application = serializer.save()
 
         return Response(
             {
-                "message": "Application submitted successfully. You will be notified via email.",
+                "message": "Application submitted successfully.",
                 "application": DriverApplicationDetailSerializer(application).data,
             },
             status=status.HTTP_201_CREATED,

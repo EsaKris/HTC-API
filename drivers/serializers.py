@@ -13,14 +13,22 @@ User = get_user_model()
 
 class DriverApplicationCreateSerializer(serializers.ModelSerializer):
     """
-    Used by a rider/user to submit a driver application.
-    The applicant is set from the authenticated request user.
+    Public driver application submission.
+    Creates user automatically if not exists.
     """
+
+    # Add identity fields
+    full_name = serializers.CharField(write_only=True)
+    email = serializers.EmailField(write_only=True)
+    phone_number = serializers.CharField(write_only=True)
 
     class Meta:
         model = DriverApplication
         fields = [
             "id",
+            "full_name",
+            "email",
+            "phone_number",
             "resume",
             "guarantor_name",
             "guarantor_phone",
@@ -32,24 +40,51 @@ class DriverApplicationCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "status", "created_at"]
 
     def validate(self, attrs):
-        user = self.context["request"].user
-        # Prevent duplicate applications
-        if DriverApplication.objects.filter(applicant=user).exists():
-            raise serializers.ValidationError(
-                "You already have a driver application on file."
-            )
-        # Must not already be a driver
-        if user.role == User.Role.DRIVER:
-            raise serializers.ValidationError("You are already a registered driver.")
+        phone = attrs.get("phone_number")
+        email = attrs.get("email")
+
+        # Try to find existing user
+        user = User.objects.filter(phone_number=phone).first()
+
+        if user:
+            # Already a driver?
+            if user.role == User.Role.DRIVER:
+                raise serializers.ValidationError(
+                    "You are already a registered driver."
+                )
+
+            # Already has application?
+            if DriverApplication.objects.filter(applicant=user).exists():
+                raise serializers.ValidationError(
+                    "You already have a driver application on file."
+                )
+
         return attrs
 
     def create(self, validated_data):
-        user = self.context["request"].user
-        # Flip role to pending_driver while application is open
-        user.role = User.Role.PENDING_DRIVER
-        user.save(update_fields=["role"])
-        return DriverApplication.objects.create(applicant=user, **validated_data)
+        full_name = validated_data.pop("full_name")
+        email = validated_data.pop("email")
+        phone_number = validated_data.pop("phone_number")
 
+        # Get or create user
+        user, created = User.objects.get_or_create(
+            phone_number=phone_number,
+            defaults={
+                "full_name": full_name,
+                "email": email,
+                "role": User.Role.PENDING_DRIVER,
+            },
+        )
+
+        # If user already existed, update role safely
+        if not created and user.role != User.Role.DRIVER:
+            user.role = User.Role.PENDING_DRIVER
+            user.save(update_fields=["role"])
+
+        return DriverApplication.objects.create(
+            applicant=user,
+            **validated_data
+        )
 
 class ApplicantSummarySerializer(serializers.ModelSerializer):
     """Compact user info embedded in application responses."""
