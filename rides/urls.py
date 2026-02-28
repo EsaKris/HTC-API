@@ -11,6 +11,14 @@ from .views import (
     AdminRideListView,
     AdminRideDetailView,
     AdminAnalyticsView,
+    UpdateDriverLocationView,
+    GetRouteView,
+    AddressAutocompleteView,
+    ReverseGeocodeView,
+    NearbyDriversView,
+    ShareTripView,
+    SharedRideView,
+    DriverLocationsView,
 )
 
 urlpatterns = [
@@ -49,4 +57,22 @@ urlpatterns = [
 
     # Analytics / dashboard stats
     path("analytics/", AdminAnalyticsView.as_view(), name="ride-analytics"),
+
+    
+    # Real-time location
+    path('rides/<uuid:ride_id>/update-location/', UpdateDriverLocationView.as_view(), name='update-location'),
+    
+    # Maps & Geocoding (FREE services)
+    path('maps/route/', GetRouteView.as_view(), name='get-route'),
+    path('maps/autocomplete/', AddressAutocompleteView.as_view(), name='autocomplete'),
+    path('maps/reverse-geocode/', ReverseGeocodeView.as_view(), name='reverse-geocode'),
+    path('maps/nearby-drivers/', NearbyDriversView.as_view(), name='nearby-drivers'),
+    
+    # Trip sharing
+    path('rides/<uuid:ride_id>/share/', ShareTripView.as_view(), name='share-trip'),
+    path('shared-ride/<str:token>/', SharedRideView.as_view(), name='shared-ride'),
+    
+    # Fleet monitoring (Admin)
+    path('drivers/locations/', DriverLocationsView.as_view(), name='driver-locations'),
+
 ]

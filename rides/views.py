@@ -7,10 +7,10 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, generics, filters
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 
 from core.permissions import IsRider, IsDriver, IsAdmin, IsRiderOrAdmin
-from .models import Ride, RideStatusLog
+from .models import Ride, RideStatusLog, DriverLocation
 from .serializers import (
     RideSerializer,
     RideRequestSerializer,
@@ -19,6 +19,11 @@ from .serializers import (
     RideStatusUpdateSerializer,
     RideAnalyticsSerializer,
 )
+from .map_utils import (
+    get_route, autocomplete_address, reverse_geocode, find_nearby_drivers
+)
+
+import secrets
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -475,3 +480,247 @@ class AdminAnalyticsView(APIView):
                 }
             }
         )
+    
+class UpdateDriverLocationView(APIView):
+    """Driver sends location updates during ride"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, ride_id):
+        try:
+            ride = Ride.objects.get(id=ride_id, driver=request.user)
+        except Ride.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Ride not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        latitude = request.data.get('latitude')
+        longitude = request.data.get('longitude')
+        
+        if not latitude or not longitude:
+            return Response(
+                {"success": False, "message": "Location required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update ride location
+        from django.utils import timezone
+        ride.current_driver_lat = latitude
+        ride.current_driver_lng = longitude
+        ride.driver_location_updated_at = timezone.now()
+        ride.save()
+        
+        # Also update driver's general location
+        DriverLocation.objects.update_or_create(
+            driver=request.user,
+            defaults={
+                'latitude': latitude,
+                'longitude': longitude,
+                'heading': request.data.get('heading'),
+                'speed': request.data.get('speed'),
+                'accuracy': request.data.get('accuracy'),
+            }
+        )
+        
+        return Response({"success": True})
+
+class GetRouteView(APIView):
+    """Get route between two points using FREE OSRM"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        origin_lat = request.data.get('origin_lat')
+        origin_lng = request.data.get('origin_lng')
+        dest_lat = request.data.get('dest_lat')
+        dest_lng = request.data.get('dest_lng')
+        
+        if not all([origin_lat, origin_lng, dest_lat, dest_lng]):
+            return Response(
+                {"success": False, "message": "Origin and destination required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        route = get_route((origin_lat, origin_lng), (dest_lat, dest_lng))
+        
+        if not route:
+            return Response(
+                {"success": False, "message": "Could not find route"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        return Response({"success": True, "route": route})
+
+class AddressAutocompleteView(APIView):
+    """Address suggestions using FREE Photon service"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        input_text = request.data.get('input')
+        
+        if not input_text or len(input_text) < 3:
+            return Response({
+                "success": True,
+                "suggestions": []
+            })
+        
+        location = None
+        if request.data.get('latitude') and request.data.get('longitude'):
+            location = (request.data['latitude'], request.data['longitude'])
+        
+        suggestions = autocomplete_address(input_text, location)
+        
+        return Response({
+            "success": True,
+            "suggestions": suggestions
+        })
+
+class ReverseGeocodeView(APIView):
+    """Convert coordinates to address using FREE Nominatim"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        latitude = request.data.get('latitude')
+        longitude = request.data.get('longitude')
+        
+        if not latitude or not longitude:
+            return Response(
+                {"success": False, "message": "Coordinates required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        address = reverse_geocode(latitude, longitude)
+        
+        return Response({
+            "success": True,
+            "address": address,
+            "latitude": latitude,
+            "longitude": longitude,
+        })
+
+class NearbyDriversView(APIView):
+    """Find available drivers near location"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        latitude = request.data.get('latitude')
+        longitude = request.data.get('longitude')
+        radius = request.data.get('radius_km', 5.0)
+        
+        if not latitude or not longitude:
+            return Response(
+                {"success": False, "message": "Location required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        drivers = find_nearby_drivers(latitude, longitude, radius)
+        
+        return Response({
+            "success": True,
+            "drivers": drivers,
+            "count": len(drivers)
+        })
+
+class ShareTripView(APIView):
+    """Generate shareable link for trip"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, ride_id):
+        try:
+            ride = Ride.objects.get(id=ride_id, rider=request.user)
+        except Ride.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Ride not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if not ride.share_token:
+            ride.share_token = secrets.token_urlsafe(16)
+            ride.share_enabled = True
+            ride.save()
+        
+        share_url = f"https://howfar.ng/shared-ride/{ride.share_token}"
+        
+        return Response({
+            "success": True,
+            "share_url": share_url,
+            "share_token": ride.share_token
+        })
+
+class SharedRideView(APIView):
+    """Public view of shared ride"""
+    permission_classes = [AllowAny]
+    
+    def get(self, request, token):
+        try:
+            ride = Ride.objects.select_related('driver', 'rider').get(
+                share_token=token,
+                share_enabled=True
+            )
+        except Ride.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Shared ride not found or expired"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        return Response({
+            "success": True,
+            "ride": {
+                "id": str(ride.id),
+                "status": ride.status,
+                "rider_name": ride.rider.full_name,
+                "driver_name": ride.driver.full_name if ride.driver else None,
+                "pickup_address": ride.pickup_address,
+                "dropoff_address": ride.dropoff_address,
+                "current_driver_location": {
+                    "latitude": ride.current_driver_lat,
+                    "longitude": ride.current_driver_lng,
+                } if ride.current_driver_lat else None,
+                "route_geometry": ride.route_geometry,
+                "estimated_arrival": ride.estimated_arrival_time,
+                "created_at": ride.created_at,
+            }
+        })
+
+class DriverLocationsView(APIView):
+    """Get all active driver locations for fleet map (Admin only)"""
+    permission_classes = [IsAuthenticated]  # Add IsAdminUser in production
+    
+    def get(self, request):
+        locations = DriverLocation.objects.filter(
+            driver__role='driver'
+        ).select_related('driver')
+        
+        drivers_data = []
+        for loc in locations:
+            driver_data = {
+                'driver_id': str(loc.driver.id),
+                'driver_name': loc.driver.full_name,
+                'latitude': loc.latitude,
+                'longitude': loc.longitude,
+                'heading': loc.heading,
+                'speed': loc.speed,
+                'is_active': loc.is_active,
+            }
+            
+            # Check if driver has an active ride
+            active_ride = Ride.objects.filter(
+                driver=loc.driver,
+                status__in=['accepted', 'started']
+            ).select_related('rider').first()
+            
+            if active_ride:
+                driver_data['current_ride'] = {
+                    'id': str(active_ride.id),
+                    'rider_name': active_ride.rider.full_name,
+                    'pickup_address': active_ride.pickup_address,
+                    'dropoff_address': active_ride.dropoff_address,
+                    'status': active_ride.status,
+                }
+            
+            drivers_data.append(driver_data)
+        
+        return Response({
+            'success': True,
+            'drivers': drivers_data,
+            'count': len(drivers_data),
+        })

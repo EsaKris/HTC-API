@@ -1,15 +1,41 @@
+# Core
 Django==4.2.11
 djangorestframework==3.15.1
+
+# Authentication
 djangorestframework-simplejwt==5.3.1
-django-cors-headers==4.3.1
-psycopg2-binary==2.9.9
-python-decouple==3.8
-Pillow
-django-filter==24.2
-drf-spectacular==0.27.2
+cryptography==42.0.5
+
+# Real-time (WebSockets)
+channels==4.0.0
+channels-redis==4.1.0
+daphne==4.0.0
+
+# Async / Background tasks
 celery==5.3.6
 redis==5.0.4
 django-redis==5.4.0
+
+# Database (PostgreSQL)
+psycopg2-binary==2.9.9
+
+# API utilities
+django-filter==24.2
+drf-spectacular==0.27.2
+
+# HTTP / External services (OSRM etc.)
+requests==2.31.0
+polyline==2.0.0
+
+# Environment & Config
+python-decouple==3.8
+
+# CORS
+django-cors-headers==4.3.1
+
+# Media
+Pillow
+
+# Production
 gunicorn==21.2.0
 whitenoise==6.6.0
-cryptography==42.0.5
