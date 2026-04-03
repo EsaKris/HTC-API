@@ -5,6 +5,25 @@ from rest_framework import serializers
 User = get_user_model()
 
 
+def normalize_phone(value: str) -> str:
+    """
+    Normalize Nigerian phone numbers to international format.
+    08012345678   → +2348012345678
+    2348012345678 → +2348012345678
+    +2348012345678 → +2348012345678 (unchanged)
+    """
+    value = value.strip()
+    if value.startswith('0'):
+        return '+234' + value[1:]
+    elif value.startswith('234') and not value.startswith('+'):
+        return '+' + value
+    elif not value.startswith('+'):
+        raise serializers.ValidationError(
+            "Phone number must start with 0 or country code e.g. +234..."
+        )
+    return value
+
+
 class UserRegistrationSerializer(serializers.ModelSerializer):
     """Register a new rider account."""
 
@@ -21,12 +40,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         read_only_fields = ["id"]
 
     def validate_phone_number(self, value):
-        value = value.strip()
-        if not value.startswith("+"):
-            raise serializers.ValidationError(
-                "Phone number must start with country code e.g. +234..."
-            )
-        return value
+        return normalize_phone(value)
 
     def create(self, validated_data):
         password = validated_data.pop("password", None)
@@ -46,7 +60,7 @@ class LoginRequestSerializer(serializers.Serializer):
     phone_number = serializers.CharField(max_length=20)
 
     def validate_phone_number(self, value):
-        return value.strip()
+        return normalize_phone(value)
 
 
 class OTPVerifySerializer(serializers.Serializer):
@@ -54,6 +68,9 @@ class OTPVerifySerializer(serializers.Serializer):
 
     phone_number = serializers.CharField(max_length=20)
     otp = serializers.CharField(max_length=6, min_length=6)
+
+    def validate_phone_number(self, value):
+        return normalize_phone(value)
 
     def validate_otp(self, value):
         if not value.isdigit():
